@@ -14,4 +14,4 @@ To compile the project make sure to follow this steps:
 
 In this compile example it's specifiend DATASET_MINI as the dataset to use, but it's possible to leave it blank and it will use the Default one.
 Using the mini dataset will be useful while doing the test, because it's faster.
-The POLUBENCH_TIME definition is added to make the code print the time of execution of the program
+The POLYBENCH_TIME definition is added to make the code print the time of execution of the program
