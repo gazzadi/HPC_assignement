@@ -54,31 +54,48 @@ void kernel_covariance(int m, int n,
 		       DATA_TYPE POLYBENCH_2D(symmat,M,M,m,m),
 		       DATA_TYPE POLYBENCH_1D(mean,M,m))
 {
-  int i, j, j1, j2;
+  int i=0, j=0, j1=0, j2=0;
   
+
+  #pragma omp target data map(to: ) \
+                          map() \
+                          map() \
+                          map() 
   /* Determine mean of column vectors of input data matrix */
+  //#pragma omp parallel for
+  //#pragma omp target map(to: data[0:_PB_N][0:_PB_M]) map(from: mean[0:_PB_M])
     for (j = 0; j < _PB_M; j++)
-      {
-        mean[j] = 0.0;
-	for (i = 0; i < _PB_N; i++)
-	  mean[j] += data[i][j];
-	mean[j] /= float_n;
-      }
+    {
+      mean[j] = 0.0;
+      for (i = 0; i < _PB_N; i++)
+        mean[j] += data[i][j];
+      mean[j] /= float_n;
+    }
       
     /* Center the column vectors. */
+    //#pragma omp parallel for
+    //#pragma omp target map(to: mean[0:_PB_M]) map(from: data[0:_PB_N][0:_PB_M])
     for (i = 0; i < _PB_N; i++)
+    {
       for (j = 0; j < _PB_M; j++)
-	data[i][j] -= mean[j];
+	      data[i][j] -= mean[j];
+
+    }
       
     /* Calculate the m * m covariance matrix. */
+    //#pragma omp parallel for
+    //#pragma omp target map(to: data[0:_PB_N][0:_PB_M]) map(from: symmat[0:_PB_M][0:_PB_M])
     for (j1 = 0; j1 < _PB_M; j1++)
       for (j2 = j1; j2 < _PB_M; j2++)
-	{
-          symmat[j1][j2] = 0.0;
-	  for (i = 0; i < _PB_N; i++)
-	    symmat[j1][j2] += data[i][j1] * data[i][j2];
-	  symmat[j2][j1] = symmat[j1][j2];
-        }
+	    {
+        symmat[j1][j2] = 0.0;
+
+        for (i = 0; i < _PB_N; i++)
+          symmat[j1][j2] += data[i][j1] * data[i][j2];
+
+
+	      symmat[j2][j1] = symmat[j1][j2];
+      }
 }
 
 int main(int argc, char** argv)
