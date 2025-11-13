@@ -67,7 +67,7 @@ void kernel_covariance(int m, int n,
 
     //#pragma omp parallel for
     //#pragma omp target map(to: data[0:_PB_N][0:_PB_M]) map(from: mean[0:_PB_M])
-    #pragma omp teams distribute parallel for num_threads(128)//num_teams(_PB_M/) dist_schedule(static, 4)
+    #pragma omp target teams distribute parallel for num_threads(128)//num_teams(_PB_M/) dist_schedule(static, 4)
       for (j = 0; j < _PB_M; j++)
       {
         mean[j] = 0.0;
@@ -81,7 +81,7 @@ void kernel_covariance(int m, int n,
       */
       //#pragma omp parallel for
       //#pragma omp target map(to: mean[0:_PB_M]) map(from: data[0:_PB_N][0:_PB_M])
-      #pragma omp teams distribute parallel for collapse(2) num_threads(128)
+      #pragma omp target teams distribute parallel for collapse(2) num_threads(128) //collapse2)
       for (i = 0; i < _PB_N; i++)
       {
         for (j = 0; j < _PB_M; j++)
@@ -98,8 +98,9 @@ void kernel_covariance(int m, int n,
       */
       //#pragma omp parallel for
       //#pragma omp target map(to: data[0:_PB_N][0:_PB_M]) map(from: symmat[0:_PB_M][0:_PB_M])
-      #pragma omp teams distribute parallel for collapse(2) num_threads(128)
+      #pragma omp target teams distribute parallel for num_threads(128) //dist_schedule(static, 128)
       for (j1 = 0; j1 < _PB_M; j1++)
+      {
         for (j2 = j1; j2 < _PB_M; j2++)
         {
           symmat[j1][j2] = 0.0;
@@ -110,13 +111,15 @@ void kernel_covariance(int m, int n,
 
           symmat[j2][j1] = symmat[j1][j2];
         }
+      }
 
     #pragma omp target exit data \
                           map(release: mean[0:_PB_M]) \
-                          map(from: symmat[0:_PB_M][0:_PB_M]) \
-                          map(release: data[0:_PB_N][0:_PB_M]) \
+                          map(from: symmat[0:_PB_M][0:_PB_M])
+                          /*
+                          map(release: data[0:_PB_N][0:_PB_M]) \ 
                           map(release: float_n)
-
+*/
 
 }
 
@@ -165,38 +168,42 @@ void kernel_covariance_cpu(int m, int n,
 		       DATA_TYPE POLYBENCH_1D(mean,M,m))
 {
   int i=0, j=0, j1=0, j2=0;
-
-  #pragma omp parallel for
+  /* Mean calculation avec réduction manuelle pour meilleure performance */
+  #pragma omp parallel for private(i) schedule(static)
   for (j = 0; j < _PB_M; j++)
   {
-    mean[j] = 0.0;
+    DATA_TYPE local_sum = 0.0;
     for (i = 0; i < _PB_N; i++)
-      mean[j] += data[i][j];
-    mean[j] /= float_n;
+      local_sum += data[i][j];
+    mean[j] = local_sum / float_n;
   }
-    
-  #pragma omp parallel for //collapse(2)
+  
+  /* Center the column vectors avec scheduling dynamique */
+  #pragma omp parallel for private(j) schedule(static) collapse(2)
   for (i = 0; i < _PB_N; i++)
   {
     for (j = 0; j < _PB_M; j++)
+    {
       data[i][j] -= mean[j];
-
+    }
   }
   
-  #pragma omp parallel for //collapse(2)
+  /* Covariance matrix avec optimisation de la localité des données */
+  #pragma omp parallel for private(j2, i) schedule(dynamic, 8) 
   for (j1 = 0; j1 < _PB_M; j1++)
+  {
     for (j2 = j1; j2 < _PB_M; j2++)
     {
-      symmat[j1][j2] = 0.0;
-
+      DATA_TYPE sum = 0.0;
+      //#pragma omp for private(i) schedule(static) reduction(+: sum)
       for (i = 0; i < _PB_N; i++)
-        symmat[j1][j2] += data[i][j1] * data[i][j2];
-
-
-      symmat[j2][j1] = symmat[j1][j2];
+      {
+        sum += data[i][j1] * data[i][j2];
+      }
+      symmat[j1][j2] = sum;
+      symmat[j2][j1] = sum;
     }
-
-
+  }
 }
 
 int main(int argc, char** argv)

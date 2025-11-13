@@ -15,8 +15,8 @@ CC=gcc
 LD=ld
 OBJDUMP=objdump
 
-#OPT=-O2 -g -fopenmp -fopenmp-targets=nvptx64-nvidia-cuda
-OPT=-O2 -g -fopenmp
+#OPT=-O2 -pg -fopenmp -fopenmp-targets=nvptx64-nvidia-cuda
+OPT=-O2 -pg -fopenmp
 CFLAGS=$(OPT) -I. $(EXT_CFLAGS)
 LDFLAGS=-lm $(EXT_LDFLAGS)
 
@@ -37,6 +37,12 @@ veryclean : clean
 
 run: $(EXE)
 	./$(EXE)
+
+profile_val: $(EXE)
+	valgrind --tool=cachegrind --dump-instr=yes --simulate-cache=yes --collect-jumps=yes ./$(EXE) $(EXT_ARGS)
+
+profile_gprof: $(EXE)
+	gprof ./$(EXE)
 
 $(DEPS): $(SRC) $(HEADERS)
 	$(CC) $(INCPATHS) $(DEP_FLAG) $(SRC) > $(DEPS)
