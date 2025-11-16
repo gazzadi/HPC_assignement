@@ -29,22 +29,61 @@ void init_array (int m, int n,
       data[i][j] = ((DATA_TYPE) i*j) / M;
 }
 
+static
+void init_array_set (int m, int n,
+		 DATA_TYPE *float_n,
+		 DATA_TYPE POLYBENCH_2D(data,M,N,m,n))
+{
+  int i, j;
+
+  *float_n = 1.2;
+
+  data[0][0] = 1;
+  data[0][1] = 2;
+  data[0][2] = 5;
+  data[0][3] = 10;
+  data[0][4] = 1;
+  data[1][0] = 2;
+  data[1][1] = 4;
+  data[1][2] = 4;
+  data[1][3] = 10;
+  data[1][4] = 0;
+  data[2][0] = 3;
+  data[2][1] = 6;
+  data[2][2] = 3;
+  data[2][3] = 10;
+  data[2][4] = 1;
+  data[3][0] = 4;
+  data[3][1] = 8;
+  data[3][2] = 2;
+  data[3][3] = 10;
+  data[3][4] = 0;
+  data[4][0] = 5;
+  data[4][1] = 10;
+  data[4][2] = 1;
+  data[4][3] = 10;
+  data[4][4] = 3;
+
+}
+
 
 /* DCE code. Must scan the entire live-out data.
    Can be used also to check the correctness of the output. */
 static
 void print_array(int m,
-		 DATA_TYPE POLYBENCH_2D(symmat,M,M,m,m))
+		 DATA_TYPE POLYBENCH_2D(symmat,M,N,m,n))
 
 {
   int i, j;
 
-  for (i = 0; i < m; i++)
+  for (i = 0; i < m; i++){
     for (j = 0; j < m; j++) {
-      fprintf (stderr, DATA_PRINTF_MODIFIER, symmat[i][j]);
-      if ((i * m + j) % 20 == 0) fprintf (stderr, "\n");
+      printf (DATA_PRINTF_MODIFIER, symmat[i][j]);
+      //if ((i * m + j) % 20 == 0) fprintf (stderr, "\n");
     }
-  fprintf (stderr, "\n");
+    printf ("\n");
+  }
+  printf ("\n");
 }
 
 
@@ -65,22 +104,18 @@ void kernel_covariance(int m, int n,
                           map(to: data[0:_PB_N][0:_PB_M]) \
                           map(to: float_n)
       
-    /* Determine mean of column vectors of input data matrix 
-    *   Calcola la media dei valori di ogni colonna (possiamo dire che ogni colonna rappresenta una feature)
-    */
+    /* Determine mean of column vectors of input data matrix */
     #pragma omp target teams distribute parallel for num_threads(128)
       for (j = 0; j < _PB_M; j++)
       {
         mean[j] = 0.0;
         for (i = 0; i < _PB_N; i++)
           mean[j] += data[i][j];
-        mean[j] /= float_n;
+        mean[j] /= _PB_N;
       }
         
-      /* Center the column vectors. 
-      *   Determina la distanza dei vari valori della matrice dalla media calcolata nel passo precedente, trovando di fatto la varianza dalla media della feature
-      */
-      #pragma omp target teams distribute parallel for collapse(2) num_threads(128)
+      /* Center the column vectors.*/
+      #pragma omp target teams distribute parallel for  num_threads(128) collapse(2)
       for (i = 0; i < _PB_N; i++)
       {
         for (j = 0; j < _PB_M; j++)
@@ -88,14 +123,8 @@ void kernel_covariance(int m, int n,
 
       }
         
-      /* Calculate the m * m covariance matrix. 
-      *   Calcola la matrice di covarianza, sulla diagonale è inserito la varianza di una singola feature (alta i valori della feature sono molto diversi)
-      *   Fuori dalla diagonale c'è il rapporto tra le varie feature
-      *     - Covarianza > 0 (Positiva): Le due features tendono a crescere (o calare) insieme.
-      *     - Covarianza < 0 (Negativa): C'è una relazione inversa. All'aumentare dell'una, l'altra tende a diminuire.
-      *     - Covarianza ≈ 0 (Quasi zero): Le due features sono incorrelate.
-      */
-      #pragma omp target teams distribute parallel for num_threads(128) collapse(2) //dist_schedule(static, 128)
+      /* Calculate the m * m covariance matrix.*/
+      #pragma omp target teams distribute parallel for num_threads(128) //collapse(2)
       for (j1 = 0; j1 < _PB_M; j1++)
       {
         for (j2 = j1; j2 < _PB_M; j2++)
@@ -105,7 +134,7 @@ void kernel_covariance(int m, int n,
           for (i = 0; i < _PB_N; i++)
             symmat[j1][j2] += data[i][j1] * data[i][j2];
 
-
+          symmat[j1][j2] /= _PB_N - 1;
           symmat[j2][j1] = symmat[j1][j2];
         }
       }
@@ -113,7 +142,6 @@ void kernel_covariance(int m, int n,
     #pragma omp target exit data \
                           map(release: mean[0:_PB_M]) \
                           map(from: symmat[0:_PB_M][0:_PB_M])
-
 }
 
 static
@@ -124,13 +152,13 @@ void kernel_covariance_seq(int m, int n,
 		       DATA_TYPE POLYBENCH_1D(mean,M,m))
 {
   int i=0, j=0, j1=0, j2=0;
-
+  
   for (j = 0; j < _PB_M; j++)
   {
     mean[j] = 0.0;
     for (i = 0; i < _PB_N; i++)
       mean[j] += data[i][j];
-    mean[j] /= float_n;
+    mean[j] /= _PB_N;
   }
   
   for (i = 0; i < _PB_N; i++)
@@ -148,9 +176,10 @@ void kernel_covariance_seq(int m, int n,
       for (i = 0; i < _PB_N; i++)
         symmat[j1][j2] += data[i][j1] * data[i][j2];
 
-
+      symmat[j1][j2] /= _PB_N - 1;
       symmat[j2][j1] = symmat[j1][j2];
     }
+
 }
 
 static
@@ -168,7 +197,7 @@ void kernel_covariance_cpu(int m, int n,
     DATA_TYPE local_sum = 0.0;
     for (i = 0; i < _PB_N; i++)
       local_sum += data[i][j];
-    mean[j] = local_sum / float_n;
+    mean[j] = local_sum / _PB_N;;
   }
   
   /* Center the column vectors avec scheduling dynamique */
@@ -193,8 +222,8 @@ void kernel_covariance_cpu(int m, int n,
       {
         sum += data[i][j1] * data[i][j2];
       }
-      symmat[j1][j2] = sum;
-      symmat[j2][j1] = sum;
+      symmat[j1][j2] = sum / _PB_N - 1;
+      symmat[j2][j1] = sum / _PB_N - 1;
     }
   }
 }
@@ -213,7 +242,7 @@ int main(int argc, char** argv)
   
   /* Initialize array(s). */
   // non è per forza necessario accellerare la creazione di questo array (opzionale)
-  init_array (m, n, &float_n, POLYBENCH_ARRAY(data));
+  init_array_set (m, n, &float_n, POLYBENCH_ARRAY(data));
 
   
   #ifdef SEQ
@@ -228,7 +257,7 @@ int main(int argc, char** argv)
 
   /* Stop and print timer. */
   polybench_stop_instruments;
-  printf("seq: ");
+  printf("\nseq time: ");
   polybench_print_instruments;
   #endif
 
@@ -246,7 +275,7 @@ int main(int argc, char** argv)
 
   /* Stop and print timer. */
   polybench_stop_instruments;
-  printf("cpu: ");
+  printf("\ncpu time: ");
   polybench_print_instruments;
   #endif
 
@@ -256,6 +285,7 @@ int main(int argc, char** argv)
   #ifdef GPU
    /* Start timer. */
   polybench_start_instruments;
+  
 
   /* Run kernel. */
   kernel_covariance(m, n, float_n,
@@ -265,10 +295,14 @@ int main(int argc, char** argv)
 
   /* Stop and print timer. */
   polybench_stop_instruments;
-  printf("teams: ");
+  printf("\ngpu time: ");
   polybench_print_instruments;
   #endif
 
+  #ifdef PRINT
+    printf("\n\ncovariance_matrix: \n");
+    print_array(m, POLYBENCH_ARRAY(symmat));
+  #endif
 
   /* Prevent dead-code elimination. All live-out data must be printed
      by the function call in argument. */

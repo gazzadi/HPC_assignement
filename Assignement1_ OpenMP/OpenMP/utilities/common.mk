@@ -10,13 +10,13 @@ SRC += $(UTIL_DIR)/polybench.c
 DEPS        := Makefile.dep
 DEP_FLAG    := -MM
 
-#CC=clang
-CC=gcc
+CC=clang
+#CC=gcc
 LD=ld
 OBJDUMP=objdump
 
-#OPT=-O2 -pg -fopenmp -fopenmp-targets=nvptx64-nvidia-cuda
-OPT=-O2 -pg -fopenmp
+OPT=-O2 -pg -fopenmp -fopenmp-targets=nvptx64-nvidia-cuda
+#OPT=-O2 -pg -fopenmp
 CFLAGS=$(OPT) -I. $(EXT_CFLAGS)
 LDFLAGS=-lm $(EXT_LDFLAGS)
 
