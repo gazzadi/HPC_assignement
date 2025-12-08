@@ -8,152 +8,102 @@
 
 /* Include polybench common header. */
 #include <polybench.h>
-
-/* Include benchmark-specific header. */
-/* Default data type is double, default size is 4000. */
 #include "covariance.h"
 
+// --- DEFINIZIONI ---
 #ifndef CHUNK_SIZE
   #define CHUNK_SIZE 8
 #endif
 
+// BLOCK_SIZE per i kernel 1D (Mean calculation)
 #ifndef BLOCK_SIZE
   #define BLOCK_SIZE 256
 #endif
 
-#define gpuErrchk(ans)                        \
-    {                                         \
-        gpuAssert((ans), __FILE__, __LINE__); \
-    }
+// [FIX] NUOVO: TILE_SIZE per il kernel 2D (Covariance) per gestire la Shared Memory
+// 32x32 floats = 4KB. 2 matrici = 8KB (Ben dentro il limite di 48KB)
+#define TILE_SIZE 32 
+
+#define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 static inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort = true)
 {
     if (code != cudaSuccess)
     {
         fprintf(stderr, "GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
-        if (abort)
-            exit(code);
+        if (abort) exit(code);
     }
 }
 
 #ifndef CUSTOM
-/* Array inrow_thread_idialization. */
+/* Array inrow_thread_inizialization. */
 static
 void inrow_thread_id_array (int m, int n,
-		 DATA_TYPE *float_n,
-		 DATA_TYPE POLYBENCH_2D(data,M,N,m,n))
+     DATA_TYPE *float_n,
+     DATA_TYPE POLYBENCH_2D(data,M,N,m,n))
 {
   int i, j;
-
   *float_n = 1.2;
-
   for (i = 0; i < M; i++)
     for (j = 0; j < N; j++)
       data[i][j] = ((DATA_TYPE) i*j) / M;
 }
 #else
+
+
 static
 void inrow_thread_id_array(int m, int n,
-		 DATA_TYPE *float_n,
-		 DATA_TYPE POLYBENCH_2D(data,M,N,m,n))
+     DATA_TYPE *float_n,
+     DATA_TYPE POLYBENCH_2D(data,M,N,m,n))
 {
-
   *float_n = 1.2;
-
-  data[0][0] = 1;
-  data[0][1] = 2;
-  data[0][2] = 5;
-  data[0][3] = 6;
-  data[0][4] = 0;
-  data[0][5] = 10;
-
-  data[1][0] = 2;
-  data[1][1] = 4;
-  data[1][2] = 5;
-  data[1][3] = 5;
-  data[1][4] = 1;
-  data[1][5] = 10;
-
-  data[2][0] = 3;
-  data[2][1] = 6;
-  data[2][2] = 5;
-  data[2][3] = 4;
-  data[2][4] = 0;
-  data[2][5] = 10;
-
-  data[3][0] = 4;
-  data[3][1] = 8;
-  data[3][2] = 5;
-  data[3][3] = 3;
-  data[3][4] = 1;
-  data[3][5] = 10;
-
-  data[4][0] = 5;
-  data[4][1] = 10;
-  data[4][2] = 5;
-  data[4][3] = 2;
-  data[4][4] = 0;
-  data[4][5] = 10;
-  
-  data[5][0] = 6;
-  data[5][1] = 12;
-  data[5][2] = 5;
-  data[5][3] = 1;
-  data[5][4] = 1;
-  data[5][5] = 10;
-
-
+  data[0][0] = 1; data[0][1] = 2; data[0][2] = 5; data[0][3] = 6; data[0][4] = 0; data[0][5] = 10;
+  data[1][0] = 2; data[1][1] = 4; data[1][2] = 5; data[1][3] = 5; data[1][4] = 1; data[1][5] = 10;
+  data[2][0] = 3; data[2][1] = 6; data[2][2] = 5; data[2][3] = 4; data[2][4] = 0; data[2][5] = 10;
+  data[3][0] = 4; data[3][1] = 8; data[3][2] = 5; data[3][3] = 3; data[3][4] = 1; data[3][5] = 10;
+  data[4][0] = 5; data[4][1] = 10; data[4][2] = 5; data[4][3] = 2; data[4][4] = 0; data[4][5] = 10;
+  data[5][0] = 6; data[5][1] = 12; data[5][2] = 5; data[5][3] = 1; data[5][4] = 1; data[5][5] = 10;
 }
 #endif
 
-
-/* DCE code. Must scan the entire live-out data.
-   Can be used also to check the correctness of the output. */
+/* DCE code. */
 static
 void print_array(int m,
-		 DATA_TYPE POLYBENCH_2D(symmat,M,N,m,n))
-
+     DATA_TYPE POLYBENCH_2D(symmat,M,N,m,n))
 {
   int i, j;
-
   for (i = 0; i < m; i++){
     for (j = 0; j < m; j++) {
       printf (DATA_PRINTF_MODIFIER, symmat[i][j]);
-      //if ((i * m + j) % 20 == 0) fprintf (stderr, "\n");
     }
     printf ("\n");
   }
   printf ("\n");
 }
 
+
 #ifndef SEQ
 
+//Mean calculation
 __global__ void mean_calculation(float * __restrict__ mean, float * __restrict__ data, int n, int m)
 {
   int row_block_id = blockIdx.y;
   int column_block_id = blockIdx.x;
   int column_thread_id = threadIdx.x;
 
-  // Calcoliamo l'indice globale della colonna per evitare di scrivere fuori array
   int global_col = column_block_id * BLOCK_SIZE + column_thread_id;
-
-  // Se siamo fuori dalle colonne valide, terminiamo il thread
   if (global_col >= n) return;
 
   int block_start = row_block_id * n * BLOCK_SIZE + column_block_id * BLOCK_SIZE;
 
   for (int block_row = 0; block_row < BLOCK_SIZE; ++block_row)
   {
-      // Calcoliamo l'indice globale della riga
       int global_row = row_block_id * BLOCK_SIZE + block_row;
-
-      // Controllo fondamentale: non leggere righe che non esistono!
       if (global_row < m) {
           float val = data[block_start + block_row * n + column_thread_id];
           atomicAdd(&mean[global_col], val);
       }
   }
 }
-
 
 __global__ void distance_calc(float * __restrict__ mean, float * __restrict__ data, int n, int m)
 {
@@ -162,33 +112,51 @@ __global__ void distance_calc(float * __restrict__ mean, float * __restrict__ da
   int row_thread_id = threadIdx.y;
   int column_thread_id = threadIdx.x;
 
-  //indice globale della colonna
-  int global_col = column_block_id * BLOCK_SIZE + column_thread_id;
-  // Calcoliamo l'indice globale della riga
-  int global_row = row_block_id * BLOCK_SIZE + row_thread_id;
+  int global_col = column_block_id * 32 + column_thread_id; // Nota: qui dipende da come lanci il kernel (vedi sotto)
+  int global_row = row_block_id * 32 + row_thread_id;
 
-  if (global_col < m && global_row < n)
+  if (global_col < n && global_row < m) // Corretto ordine indici: col < n, row < m
     data[global_row * n + global_col] -= mean[global_col];
-  
 }
 
-/*
-__global__ void covariance_calc(float * __restrict__ symmat, float * __restrict__ data)
+
+// Kernel Covarianza Corretto: Calcola Cov(Col_i, Col_j)
+// n = numero di colonne (Features) -> Dimensione Output NxN
+// m = numero di righe (Osservazioni) -> Dimensione Riduzione Loop
+__global__ void covariance_calc(DATA_TYPE * __restrict__ symmat, DATA_TYPE * __restrict__ data, int m, int n)
 {
-  int i, j1, j2;
-  for (j1 = 0; j1 < _PB_M; j1++)
-    for (j2 = j1; j2 < _PB_M; j2++)
+    // Indici delle Feature (Colonne)
+    int j1 = blockIdx.y * blockDim.y + threadIdx.y; // Riga della matrice Covarianza (Feature 1)
+    int j2 = blockIdx.x * blockDim.x + threadIdx.x; // Colonna della matrice Covarianza (Feature 2)
+
+    // Bounds Check
+    if (j1 >= n || j2 >= n) return;
+
+    // Ottimizzazione Simmetria: Calcoliamo solo triangolare superiore + diagonale
+    if (j2 < j1) return;
+
+    DATA_TYPE sum = 0.0;
+
+    // Loop di riduzione lungo le righe (Osservazioni - m)
+    for (int i = 0; i < m; i++)
     {
-      symmat[j1][j2] = 0.0;
+        // Accediamo alla stessa riga 'i', ma colonne diverse 'j1' e 'j2'
+        // data è linearizzato: index = riga * n + colonna
+        sum += data[i * n + j1] * data[i * n + j2];
+    }
 
-      for (i = 0; i < _PB_N; i++)
-        symmat[j1][j2] += data[i][j1] * data[i][j2];
-
-      symmat[j1][j2] /= _PB_N - 1;
-      symmat[j2][j1] = symmat[j1][j2];
+    // Scrittura risultato normalizzato
+    // Divisione per (m - 1) perché m è il numero di osservazioni
+    DATA_TYPE val = sum / (DATA_TYPE)(m - 1);
+    
+    symmat[j1 * n + j2] = val;
+    
+    // Scrittura speculare per la triangolare inferiore
+    if (j1 != j2) {
+        symmat[j2 * n + j1] = val;
     }
 }
-*/
+
 
 static void kernel_covariance_cuda(int m, int n,
            DATA_TYPE float_n,
@@ -198,174 +166,72 @@ static void kernel_covariance_cuda(int m, int n,
 {
   float *d_mean; 
   float *d_data;
-  
-  // Alloco memoria host per leggere il risultato
-  float *h_mean = (float*)malloc(sizeof(float) * n); // Nota: Dimensione 'n' (colonne)
 
-  gpuErrchk(cudaMalloc((void **)&d_mean, sizeof(float) * m)); // Dimensione 'n'
+  gpuErrchk(cudaMalloc((void **)&d_mean, sizeof(float) * m)); 
   gpuErrchk(cudaMalloc((void **)&d_data, sizeof(float) * m * n));
+  
+  
 
-  // 1. IMPORTANTE: Azzera la memoria per atomicAdd
   gpuErrchk(cudaMemset(d_mean, 0, sizeof(float) * m));
-  
-  printf("\nCopia dati su GPU...");
+  //printf("\nCopia dati su GPU...");
   gpuErrchk(cudaMemcpy(d_data, data, sizeof(float) * m * n, cudaMemcpyHostToDevice));
-  // 2. CONFIGURAZIONE DEL LANCIO 2D
-  // Vogliamo blocchi di dimensione BLOCK_SIZE sull'asse X (colonne)
-  // Sull'asse Y mettiamo 1, perché il loop 'for' interno al kernel gestisce le righe verticalmente
+
+  // --- 1. MEDIA ---
   dim3 dimBlock(BLOCK_SIZE, 1, 1);
-
-  // La griglia deve coprire tutte le colonne (n) e tutte le righe (m)
-  // Grid X: copre le colonne
-  // Grid Y: copre le righe (che userai come row_block_id)
   dim3 dimGrid((n + BLOCK_SIZE - 1) / BLOCK_SIZE, 
-               (m + BLOCK_SIZE - 1) / BLOCK_SIZE, 
-               1);
+               (m + BLOCK_SIZE - 1) / BLOCK_SIZE, 1);
 
-  printf("\nLancio Kernel Grid(%d, %d) Block(%d, %d)...", dimGrid.x, dimGrid.y, dimBlock.x, dimBlock.y);
-  
+  //printf("\nLancio Kernel Media Grid(%d, %d)...", dimGrid.x, dimGrid.y);
   mean_calculation<<<dimGrid, dimBlock>>>(d_mean, d_data, n, m);
-
   gpuErrchk(cudaDeviceSynchronize()); 
-  gpuErrchk(cudaPeekAtLastError()); // Catch errori di lancio
+  
+  float *h_mean = (float*)malloc(sizeof(float) * n); 
 
-  // Copia risultati indietro
+  // Calcolo media su Host
   gpuErrchk(cudaMemcpy(h_mean, d_mean, sizeof(float) * m, cudaMemcpyDeviceToHost));
-
-  // 3. DIVISIONE FINALE (La media richiede somma / N_elementi)
-  // Poiché atomicAdd ha fatto solo la somma, dobbiamo dividere per il numero di righe (m)
-  // Lo facciamo sulla CPU per semplicità, visto che devi stampare
-  printf("\nRisultati Media:\n");
-  for (int i = 0; i < m; ++i) { // Iteriamo sulle colonne 'n'
-    h_mean[i] /= (float)n; // <--- PASSAGGIO MANCANTE FONDAMENTALE
-      
-    // Stampiamo solo i primi 10 per non intasare il terminale
-    if (i < 10) printf("Column[%d] Mean = %f \n", i, h_mean[i]);
+  for (int i = 0; i < m; ++i) { 
+    h_mean[i] /= (float)n; 
   }
-
-  // [NUOVO E FONDAMENTALE] 
-  // Copiamo le MEDIE calcolate (non più le somme) indietro su d_mean nella GPU
-  // affinché il prossimo kernel possa usarle.
   gpuErrchk(cudaMemcpy(d_mean, h_mean, sizeof(float) * m, cudaMemcpyHostToDevice));
 
-  // Possiamo liberare h_mean qui se non serve più per stampe finali, 
-  // ma tienilo se vuoi passarlo alla funzione di output PolyBench.
-  // free(h_mean); // Scommenta se vuoi liberare subito
+  free(h_mean);
 
-
-  // --- 4. KERNEL 2: CALCOLO DEVIAZIONE (Distance Calc) [NUOVO] ---
-  
-  // Configurazione 2D per coprire l'intera matrice
-  // Nota: Data la natura di distance_calc, usiamo una griglia 2D classica
+  // --- 2. DISTANCE (DEVIAZIONE) ---
   dim3 dimBlockDist(32, 32); 
   dim3 dimGridDist((n + dimBlockDist.x - 1) / dimBlockDist.x, 
                    (m + dimBlockDist.y - 1) / dimBlockDist.y);
 
-  printf("Lancio Kernel Distance Grid(%d, %d)...\n", dimGridDist.x, dimGridDist.y);
-  
-  // d_data viene modificato "in-place" (i valori vecchi vengono sovrascritti dai nuovi)
+  //printf("\nLancio Kernel Distance Grid(%d, %d)...", dimGridDist.x, dimGridDist.y);
   distance_calc<<<dimGridDist, dimBlockDist>>>(d_mean, d_data, n, m);
+  gpuErrchk(cudaDeviceSynchronize());
+
+  cudaFree(d_mean);
+
+  // --- 3. COVARIANZA ---
+  
+  float *d_symmat; // Puntatore device per la matrice risultato
+  gpuErrchk(cudaMalloc((void **)&d_symmat, sizeof(float) * m * m)); 
+
+  dim3 dimBlockCov(16, 16); 
+  dim3 dimGridCov((n + dimBlockCov.x - 1) / dimBlockCov.x, 
+                  (n + dimBlockCov.y - 1) / dimBlockCov.y);
+
+  //printf("\nLancio Covariance Kernel Grid(%d, %d)...\n", dimGridCov.x, dimGridCov.y);
+  
+  covariance_calc<<<dimGridCov, dimBlockCov>>>(d_symmat, d_data, m, n);
   
   gpuErrchk(cudaDeviceSynchronize());
   gpuErrchk(cudaPeekAtLastError());
-
-
-  // --- 5. COPIA RISULTATI FINALI E CLEANUP ---
   
-  // Se vuoi vedere il risultato finale di d_data (la matrice deviazione), 
-  // devi copiarla indietro su 'data' (host)
-  gpuErrchk(cudaMemcpy(data, d_data, sizeof(float) * m * n, cudaMemcpyDeviceToHost));
+  gpuErrchk(cudaMemcpy(symmat, d_symmat, sizeof(float) * n * n, cudaMemcpyDeviceToHost));
 
-
-
-// --- INIZIO DEBUG: STAMPA MATRICE DEVIAZIONE ---
-  printf("\n--- Matrice di Deviazione (Host View) ---\n");
-
-  // 1. Alloco un buffer temporaneo su Host per leggere il risultato
-  //    Usa DATA_TYPE se hai definito la macro, altrimenti float
-  float *h_deviation = (float*)malloc(sizeof(float) * m * n);
-
-  // 2. Copio i dati modificati dalla GPU alla CPU
-  gpuErrchk(cudaMemcpy(h_deviation, d_data, sizeof(float) * m * n, cudaMemcpyDeviceToHost));
-
-  // 3. Stampa
-  // Impostiamo un limite per evitare di intasare il terminale se la matrice è enorme
-  int print_limit_rows = (m < 20) ? m : 20; 
-  int print_limit_cols = (n < 20) ? n : 20;
-
-  for (int i = 0; i < print_limit_rows; i++) {
-      printf("Row %d: ", i);
-      for (int j = 0; j < print_limit_cols; j++) {
-          // Stampiamo il valore. Dovresti vedere valori negativi e positivi centrati sullo 0
-          printf("%6.2f ", h_deviation[i * n + j]); 
-      }
-      printf("\n");
-  }
-
-  if (m > 20 || n > 20) {
-      printf("... (stampa troncata per dimensioni eccessive) ...\n");
-  }
-  printf("-----------------------------------------\n");
-
-  // 4. Pulizia memoria temporanea
-  free(h_deviation);
-  // --- FINE DEBUG ---
-
-
-
-
-
-
-
-  // Solo ORA, alla fine di tutto, liberiamo la memoria GPU
-  cudaFree(d_mean);
   cudaFree(d_data);
+  cudaFree(d_symmat); 
   
-  // Libera h_mean se non l'hai fatto prima
-  free(h_mean); 
 }
 
 #endif
-
-#ifdef SEQ
-static
-void kernel_covariance_seq(int m, int n,
-		       DATA_TYPE float_n,
-		       DATA_TYPE POLYBENCH_2D(data,M,N,m,n),
-		       DATA_TYPE POLYBENCH_2D(symmat,M,M,m,m),
-		       DATA_TYPE POLYBENCH_1D(mean,M,m))
-{
-  int i=0, j=0, j1=0, j2=0;
-  
-  for (j = 0; j < _PB_M; j++)
-  {
-    mean[j] = 0.0;
-    for (i = 0; i < _PB_N; i++)
-      mean[j] += data[i][j];
-    mean[j] /= _PB_N;
-  }
-  
-  for (i = 0; i < _PB_N; i++)
-  {
-    for (j = 0; j < _PB_M; j++)
-      data[i][j] -= mean[j];
-
-  }
-
-  for (j1 = 0; j1 < _PB_M; j1++)
-    for (j2 = j1; j2 < _PB_M; j2++)
-    {
-      symmat[j1][j2] = 0.0;
-
-      for (i = 0; i < _PB_N; i++)
-        symmat[j1][j2] += data[i][j1] * data[i][j2];
-
-      symmat[j1][j2] /= _PB_N - 1;
-      symmat[j2][j1] = symmat[j1][j2];
-    }
-
-}
-#endif
+// ... [Il resto del file main rimane uguale] ...
 
 int main(int argc, char** argv)
 {
@@ -383,8 +249,10 @@ int main(int argc, char** argv)
   // non è per forza necessario accellerare la creazione di questo array (opzionale)
   inrow_thread_id_array(m, n, &float_n, POLYBENCH_ARRAY(data));
 
+  #ifdef PRINT
   printf("\nStarting matrix\n");
   print_array(m, POLYBENCH_ARRAY(data));
+  #endif
 
   #ifdef SEQ
   /* Start timer. */
