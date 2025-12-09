@@ -20,15 +20,10 @@ Possible options in EXT_CFLAGS:
     - STANDARD_DATASET      1000x1000 (Default)
     - LARGE_DATASET         2000x2000
     - EXTRALARGE_DATASET    4000x4000
-    - CUSTOM                5x5 (Custom matrix with fixed values)
-- type of execution:
-    - SEQ : compile the code using the sequential kernel
-    - CPU : compile the code using the cpu parallelization
-    - GPU : compile the code using the gpu paralelization
+    - CUSTOM                6x6 (Custom matrix with fixed values)
+- SEQ : compile without using the kernels, but the sequential code
 - PRINT : print the covariance matrix at the end of execution (use only with CUSTOM dataset)
-
-
-The makefile have two different version to compile with gcc o clang (there is commented code in ./OpenMP/utilities/common.mk)
+- TILING : compile the code using the tiling method on covariance calculation, otherwise wil be use normal cuda parallelization
 
 ---
 
@@ -39,40 +34,38 @@ To test the correctness of the calculation running the code with this code, chan
 
 _The CUSTOM dataset run the code using this matrix:_
 
-         Original Matrix																		
-        1	2	5	10	1														
-        2	4	4	10	0														
-        3	6	3	10	1														
-        4	8	2	10	0														
-        5	10	1	10	3														
- Mean	3	6	3	10	1														
+$$\mathbf{X} = \begin{pmatrix} 1 & 2 & 5 & 6 & 0 & 10 \\\ 2 & 4 & 5 & 5 & 1 & 10 \\\ 3 & 6 & 5 & 4 & 0 & 10 \\\ 4 & 8 & 5 & 3 & 1 & 10 \\\ 5 & 10 & 5 & 2 & 0 & 10 \\\ 6 & 12 & 5 & 1 & 1 & 10 \end{pmatrix}$$
 
-_These are the steps for the calculation:_
+---
 
-    Deviation matrix transpose (D)				Deviation matrix transpose (D_t)			D_t  x  D 				
-    -2	-4	2	0	0			                -2	-1	0	1	2			                10	20	-10	0	4
-    -1	-2	1	0	-1			                -4	-2	0	2	4			                20	40	-20	0	8
-    0	0	0	0	0			                2	1	0	-1	-2			                -10	-20	10	0	-4
-    1	2	-1	0	-1			                0	0	0	0	0			                0	0	0	0	0
-    2	4	-2	0	2			                0	-1	0	-1	2			                4	8	-4	0	6
+## 1. Mean vector
 
+Mean vector ($\boldsymbol{\mu}$) contains mean of each column :
 
-_Results:_
+$$\boldsymbol{\mu} = \begin{pmatrix} 3.5 & 7.0 & 5.0 & 3.5 & 0.5 & 10.0 \end{pmatrix}$$
 
-    Covariance Matrix				
-    2.5	    5	    -2.5	0	    1
-    5	    10	    -5	    0	    2
-    -2.5	-5	    2.5	    0	    -1
-    0	    0	    0	    0	    0
-    1	    2	    -1	    0	    1.5
+---
+
+## 2. Deviation Matrix
+
+Deviation Matrix ($\mathbf{D}$) is obtained subtracting the corrispondent mean from each value in the matrix ($\mathbf{D} = \mathbf{X} - \boldsymbol{\mu}$):
+
+$$\mathbf{D} = \begin{pmatrix} -2.5 & -5.0 & 0.0 & 2.5 & -0.5 & 0.0 \\\ -1.5 & -3.0 & 0.0 & 1.5 & 0.5 & 0.0 \\\ -0.5 & -1.0 & 0.0 & 0.5 & -0.5 & 0.0 \\\ 0.5 & 1.0 & 0.0 & -0.5 & 0.5 & 0.0 \\\ 1.5 & 3.0 & 0.0 & -1.5 & -0.5 & 0.0 \\\ 2.5 & 5.0 & 0.0 & -2.5 & 0.5 & 0.0 \end{pmatrix}$$
+
+---
+
+## 3. Covariance Matrix
+
+Covariance matrix ($\mathbf{C}$) is calculated like $\mathbf{C} = \frac{1}{n-1} \mathbf{D}^T \mathbf{D}$, where $n=6$ (number of observation) and $n-1 = 5$.
+
+$$\mathbf{C} = \begin{pmatrix} 3.5 & 7.0 & 0.0 & -3.5 & 0.3 & 0.0 \\\ 7.0 & 14.0 & 0.0 & -7.0 & 0.6 & 0.0 \\\ 0.0 & 0.0 & 0.0 & 0.0 & 0.0 & 0.0 \\\ -3.5 & -7.0 & 0.0 & 3.5 & -0.3 & 0.0 \\\ 0.3 & 0.6 & 0.0 & -0.3 & 0.3 & 0.0 \\\ 0.0 & 0.0 & 0.0 & 0.0 & 0.0 & 0.0 \end{pmatrix}$$
 
 ---
 
 ### Profiling
 
 Using the make directives:
-- profile_val : run profiling with valgrind (takes a lot of time)
-- profile_gprof : run profiling with gprof (tested and working)
+- profile : run profiling with gprof (tested and working)
 
 
 
