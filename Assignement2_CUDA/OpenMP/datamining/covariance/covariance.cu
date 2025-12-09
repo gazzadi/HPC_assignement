@@ -127,34 +127,69 @@ __global__ void distance_calc(float * __restrict__ mean, float * __restrict__ da
 }
 
 
-// Kernel for covariance Matrix calculation
-__global__ void covariance_calc(DATA_TYPE * __restrict__ symmat, DATA_TYPE * __restrict__ data, int n, int m)
+
+// --- KERNEL OTTIMIZZATO CON TILING ---
+__global__ void covariance_tiled(float * __restrict__ symmat, float * __restrict__ data, int n, int m)
 {
-    // Features indexes
-    int j1 = blockIdx.y * blockDim.y + threadIdx.y; // row of covariance_matrix (Feature 1)
-    int j2 = blockIdx.x * blockDim.x + threadIdx.x; // column of covariance_matrix (Feature 2)
+  // Indexes inside the Tile
+  int tx = threadIdx.x;
+  int ty = threadIdx.y;
 
-    // Bounds Check
-    if (j1 >= m || j2 >= m) return;
+  // Column Features
+  int j1 = blockIdx.y * TILE_SIZE + ty; // row of covariance_matrix (Feature Y)
+  int j2 = blockIdx.x * TILE_SIZE + tx; // column of covariance_matrix (Feature X)
 
-    // Check for triangular
-    if (j2 < j1) return;
+  // We work only on the upper triangular matrix, because of symmetry
+  if (blockIdx.x < blockIdx.y) return;
 
-    DATA_TYPE sum = 0.0;
+  // Two tiles
+  // 1. Data of features block Y (tile_row)
+  // 2. Data of features block X (tile_col)
+  __shared__ float tile_row[TILE_SIZE][TILE_SIZE + 1]; // +1 to avoid Bank Conflicts
+  __shared__ float tile_col[TILE_SIZE][TILE_SIZE + 1];
 
-    for (int i = 0; i < n; i++)
-    {
-        // we access the same row a t different columns
-        sum += data[i * m + j1] * data[i * m + j2];
-    }
+  float sum = 0.0f;
 
-    // Normalization
-    DATA_TYPE val = sum / (DATA_TYPE)(n - 1);
-    
-    symmat[j1 * m + j2] = val;
-    if (j1 != j2) {
-        symmat[j2 * m + j1] = val;
-    }
+  //Iteration on all the samples wit tile size
+  for (int k = 0; k < n; k += TILE_SIZE)
+  {      
+      int current_sample_idx = k + ty;
+      
+      int feature_y_idx = blockIdx.y * TILE_SIZE + tx;
+      int feature_x_idx = blockIdx.x * TILE_SIZE + tx;
+
+      if (current_sample_idx < n && feature_y_idx < m) {
+          tile_row[ty][tx] = data[current_sample_idx * m + feature_y_idx];
+      } else {
+          tile_row[ty][tx] = 0.0f;
+      }
+      
+      if (current_sample_idx < n && feature_x_idx < m) {
+          tile_col[ty][tx] = data[current_sample_idx * m + feature_x_idx];
+      } else {
+          tile_col[ty][tx] = 0.0f;
+      }
+
+      __syncthreads();
+
+      for (int s = 0; s < TILE_SIZE; ++s)
+      {
+          sum += tile_row[s][ty] * tile_col[s][tx];
+      }
+
+      // Synchronize before deleteing shared memory
+      __syncthreads();
+  }
+
+  // Writing results
+  if (j1 < m && j2 < m)
+  {
+      float val = sum / (float)(n - 1);
+      symmat[j1 * m + j2] = val;
+      if (j1 != j2) {
+          symmat[j2 * m + j1] = val;
+      }
+  }
 }
 
 static void kernel_covariance_cuda(int m, int n,
@@ -205,12 +240,12 @@ static void kernel_covariance_cuda(int m, int n,
   float *d_symmat; 
   gpuErrchk(cudaMalloc((void **)&d_symmat, sizeof(float) * m * m)); 
 
-  dim3 dimBlockCov(16, 16); 
-  dim3 dimGridCov((n + dimBlockCov.x - 1) / dimBlockCov.x, 
-                  (n + dimBlockCov.y - 1) / dimBlockCov.y);
-  
-  covariance_calc<<<dimGridCov, dimBlockCov>>>(d_symmat, d_data, n, m);
-  
+  dim3 dimBlockCov(TILE_SIZE, TILE_SIZE); 
+  dim3 dimGridCov((m + TILE_SIZE - 1) / TILE_SIZE, 
+                  (m + TILE_SIZE - 1) / TILE_SIZE);
+
+  covariance_tiled<<<dimGridCov, dimBlockCov>>>(d_symmat, d_data, n, m);
+
   gpuErrchk(cudaDeviceSynchronize());
   gpuErrchk(cudaPeekAtLastError());
   
