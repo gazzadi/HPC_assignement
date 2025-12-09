@@ -81,52 +81,32 @@ void print_array(int m,
 
 #ifndef SEQ
 
-// Kernel Mean calculation
-__global__ void mean_calculation(float * __restrict__ mean, float * __restrict__ data, int n, int m)
+
+// Kernel Mean Calculation
+__global__ void mean_calculation(float *mean, const float *data, int n, int m)
 {
-    int block_dim_x = blockDim.x;
-    int block_dim_y = blockDim.y;
-
-    int row_block_id = blockIdx.y;
-    int column_block_id = blockIdx.x;
-    int column_thread_id = threadIdx.x;
-
-    int global_col = column_block_id * block_dim_y + column_thread_id;
-    
-    // Bound Check
-    if (global_col >= n) return;
-
-    // Iteration on all the block rows
-    for (int block_row = 0; block_row < block_dim_x; ++block_row)
-    {
-        int global_row = row_block_id * block_dim_x + block_row;
-        
-        // Bound Check
-        if (global_row < m) {
-            
-            float val = data[global_row * n + global_col];
-            // Using AtomicAdd prevent to consequential modification of the same memory cell
-            atomicAdd(&mean[global_col], val);
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j < m) {
+        float sum = 0.0;
+        for (int i = 0; i < n; i++) {
+            sum += data[i * m + j];
         }
+        mean[j] = sum / (float)n;
     }
 }
 
 // Kernel Deviation Matrix Calculation
-__global__ void distance_calc(float * __restrict__ mean, float * __restrict__ data, int n, int m)
+__global__ void center_kernel(const float *mean, float *data, int n, int m)
 {
-  int row_block_id = blockIdx.y;
-  int column_block_id = blockIdx.x;
-  int row_thread_id = threadIdx.y;
-  int column_thread_id = threadIdx.x;
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    int i = blockIdx.y * blockDim.y + threadIdx.y;
 
-  int global_col = column_block_id * blockDim.y + column_thread_id;
-  int global_row = row_block_id * blockDim.x + row_thread_id;
-
-  if (global_col < n && global_row < m)
-    data[global_row * n + global_col] -= mean[global_col];
+    if (i < n && j < m) {
+        data[i * m + j] -= mean[j];
+    }
 }
 
-
+#ifdef TILING 
 
 // --- KERNEL OTTIMIZZATO CON TILING ---
 __global__ void covariance_tiled(float * __restrict__ symmat, float * __restrict__ data, int n, int m)
@@ -192,37 +172,49 @@ __global__ void covariance_tiled(float * __restrict__ symmat, float * __restrict
   }
 }
 
+#else
+
+__global__ void covariance_kernel(float *symmat, const float *data, int n, int m)
+{
+    int j1 = blockIdx.y * blockDim.y + threadIdx.y;
+    int j2 = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (j1 < m && j2 < m && j2 >= j1) {
+        float sum = 0.0;
+        for (int i = 0; i < n; i++) {
+            sum += data[i * m + j1] * data[i * m + j2];
+        }
+
+        float cov = sum / (float)(n - 1);
+        symmat[j1 * m + j2] = cov;
+        symmat[j2 * m + j1] = cov;
+    }
+}
+
+#endif
+
+
+
 static void kernel_covariance_cuda(int m, int n,
            DATA_TYPE float_n,
            DATA_TYPE POLYBENCH_2D(data,M,N,m,n),
            DATA_TYPE POLYBENCH_2D(symmat,M,M,m,m),
            DATA_TYPE POLYBENCH_1D(mean,M,m))
 {
+  // --- 1. MEAN ---
   float *d_mean; 
   float *d_data;
 
   gpuErrchk(cudaMalloc((void **)&d_mean, sizeof(float) * m)); 
   gpuErrchk(cudaMalloc((void **)&d_data, sizeof(float) * m * n));
-  
-  gpuErrchk(cudaMemset(d_mean, 0, sizeof(float) * m));
+
   gpuErrchk(cudaMemcpy(d_data, data, sizeof(float) * m * n, cudaMemcpyHostToDevice));
 
-  // --- 1. MEAN ---
-  dim3 dimBlock(BLOCK_SIZE, 1, 1);
-  dim3 dimGrid((n + BLOCK_SIZE - 1) / BLOCK_SIZE, 
-               (m + BLOCK_SIZE - 1) / BLOCK_SIZE, 1);
-  mean_calculation<<<dimGrid, dimBlock>>>(d_mean, d_data, n, m);
-  gpuErrchk(cudaDeviceSynchronize()); 
-  
-  // MEAN CALCULATION ON HOST
-  float *h_mean = (float*)malloc(sizeof(float) * n); 
-  gpuErrchk(cudaMemcpy(h_mean, d_mean, sizeof(float) * m, cudaMemcpyDeviceToHost));
-  for (int i = 0; i < m; ++i) { 
-    h_mean[i] /= (float)n; 
-  }
-  gpuErrchk(cudaMemcpy(d_mean, h_mean, sizeof(float) * m, cudaMemcpyHostToDevice));
+  int block_size = 256;
+  int grid_size_mean = (m + block_size - 1) / block_size;
 
-  free(h_mean);
+  mean_calculation<<<grid_size_mean, block_size>>>(d_mean, d_data, n, m);
+  gpuErrchk(cudaDeviceSynchronize());
 
 
   // --- 2. DISTANCE ---
@@ -230,24 +222,36 @@ static void kernel_covariance_cuda(int m, int n,
   dim3 dimGridDist((n + dimBlockDist.x - 1) / dimBlockDist.x, 
                    (m + dimBlockDist.y - 1) / dimBlockDist.y);
 
-  distance_calc<<<dimGridDist, dimBlockDist>>>(d_mean, d_data, n, m);
+  center_kernel<<<dimGridDist, dimBlockDist>>>(d_mean, d_data, n, m);
   gpuErrchk(cudaDeviceSynchronize());
 
-  cudaFree(d_mean);
+  gpuErrchk(cudaMemcpy(mean, d_mean, sizeof(float) * m, cudaMemcpyDeviceToHost));
 
+  cudaFree(d_mean);
 
   // --- 3. COVARIANCE ---
   float *d_symmat; 
   gpuErrchk(cudaMalloc((void **)&d_symmat, sizeof(float) * m * m)); 
+  
+  #ifdef TILING
 
-  dim3 dimBlockCov(TILE_SIZE, TILE_SIZE); 
-  dim3 dimGridCov((m + TILE_SIZE - 1) / TILE_SIZE, 
-                  (m + TILE_SIZE - 1) / TILE_SIZE);
+  dim3 dimBlockCov(32, 32); 
+  dim3 dimGridCov((m + 32 - 1) / 32, 
+                  (m + 32 - 1) / 32);
 
   covariance_tiled<<<dimGridCov, dimBlockCov>>>(d_symmat, d_data, n, m);
 
   gpuErrchk(cudaDeviceSynchronize());
   gpuErrchk(cudaPeekAtLastError());
+
+  #else
+
+  dim3 block_2d(16, 16);
+  dim3 grid_cov((m + 15) / 16, (m + 15) / 16);
+  covariance_kernel<<<grid_cov, block_2d>>>(d_symmat, d_data, n, m);
+  gpuErrchk(cudaDeviceSynchronize());
+
+  #endif
   
   gpuErrchk(cudaMemcpy(symmat, d_symmat, sizeof(float) * n * n, cudaMemcpyDeviceToHost));
 
