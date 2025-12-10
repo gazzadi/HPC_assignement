@@ -30,7 +30,8 @@ Possible options in EXT_CFLAGS:
 ### Testing
 
 To test the correctness of the calculation running the code with this code, change the type of execution to check all the results with the fixed dataset:
- make EXT_CFLAGS="-DPOLYBENCH_TIME -DGPU -DCUSTOM -DPRINT" clean all run
+ make EXT_CFLAGS="-DPOLYBENCH_TIME -DCUSTOM -DPRINT " clean all run
+ We can also add -DTILING to use the tiling calculation.
 
 _The CUSTOM dataset run the code using this matrix:_
 
